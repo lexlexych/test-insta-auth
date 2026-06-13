@@ -140,23 +140,29 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Шаг 6: short -> long-lived token (60 дней)
-    const u2 = new URL(`${GRAPH}/access_token`);
-    u2.searchParams.set('grant_type', 'ig_exchange_token');
-    u2.searchParams.set('client_secret', appSecret);
-    u2.searchParams.set('access_token', short.access_token);
-    const j2 = await (await fetch(u2)).json();
+    // Шаг 6: short -> long-lived token (60 дней). По докам это именно GET.
+    // URL собираем строкой (буква в букву как в документированном curl),
+    // чтобы исключить потерю query-параметров при сериализации URL-объекта.
+    const longUrl = `${GRAPH}/access_token`
+      + `?grant_type=ig_exchange_token`
+      + `&client_secret=${encodeURIComponent(appSecret)}`
+      + `&access_token=${encodeURIComponent(short.access_token)}`;
+    const j2 = await (await fetch(longUrl, { method: 'GET' })).json();
     if (!j2.access_token) {
+      const maskedUrl = longUrl.replace(encodeURIComponent(appSecret), '***SECRET***');
       res.statusCode = 200;
-      res.end(errorPage('Ошибка обмена на long-lived токен', JSON.stringify(j2, null, 2)));
+      res.end(errorPage('Ошибка обмена на long-lived токен',
+        'Ответ Instagram:\n' + JSON.stringify(j2, null, 2)
+        + '\n\nЗапрошенный URL (секрет скрыт):\n' + maskedUrl
+        + '\n\nShort-lived токен (валиден 1 час) — им можно проверить обмен вручную через curl:\n'
+        + short.access_token));
       return;
     }
 
     // Шаг 7: кто подключился
-    const u3 = new URL(`${GRAPH}/me`);
-    u3.searchParams.set('fields', 'user_id,username');
-    u3.searchParams.set('access_token', j2.access_token);
-    const me = await (await fetch(u3)).json();
+    const meUrl = `${GRAPH}/me?fields=user_id,username`
+      + `&access_token=${encodeURIComponent(j2.access_token)}`;
+    const me = await (await fetch(meUrl, { method: 'GET' })).json();
 
     res.statusCode = 200;
     res.end(successPage({
