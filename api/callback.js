@@ -140,21 +140,30 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Шаг 6: short -> long-lived token (60 дней). По докам это именно GET.
-    // URL собираем строкой (буква в букву как в документированном curl),
-    // чтобы исключить потерю query-параметров при сериализации URL-объекта.
-    const longUrl = `${GRAPH}/access_token`
-      + `?grant_type=ig_exchange_token`
+    // Шаг 6: short -> long-lived token (60 дней).
+    // Документация показывает GET, но эндпоинт для токенов нового формата (IGAA)
+    // может отвечать "Unsupported request - method type: get". Поэтому пробуем GET,
+    // а при таком отказе — повторяем тот же запрос POST'ом.
+    const exParams = `grant_type=ig_exchange_token`
       + `&client_secret=${encodeURIComponent(appSecret)}`
       + `&access_token=${encodeURIComponent(short.access_token)}`;
-    const j2 = await (await fetch(longUrl, { method: 'GET' })).json();
+
+    let j2 = await (await fetch(`${GRAPH}/access_token?${exParams}`, { method: 'GET' })).json();
+    let exGetErr = null;
     if (!j2.access_token) {
-      const maskedUrl = longUrl.replace(encodeURIComponent(appSecret), '***SECRET***');
+      exGetErr = j2;
+      j2 = await (await fetch(`${GRAPH}/access_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: exParams,
+      })).json();
+    }
+    if (!j2.access_token) {
       res.statusCode = 200;
       res.end(errorPage('Ошибка обмена на long-lived токен',
-        'Ответ Instagram:\n' + JSON.stringify(j2, null, 2)
-        + '\n\nЗапрошенный URL (секрет скрыт):\n' + maskedUrl
-        + '\n\nShort-lived токен (валиден 1 час) — им можно проверить обмен вручную через curl:\n'
+        (exGetErr ? 'Ответ на GET:\n' + JSON.stringify(exGetErr, null, 2) + '\n\n' : '')
+        + 'Ответ на POST:\n' + JSON.stringify(j2, null, 2)
+        + '\n\nShort-lived токен (валиден 1 час) — им можно проверить обмен вручную:\n'
         + short.access_token));
       return;
     }
