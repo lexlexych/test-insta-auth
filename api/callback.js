@@ -2,7 +2,7 @@
 // Шаги 4-7: принимает code, на сервере обменивает его на short-lived токен,
 // затем на long-lived (60 дней), запрашивает /me и рендерит страницу с токеном.
 
-const GRAPH = 'https://graph.instagram.com';
+const GRAPH = 'https://graph.instagram.com/v25.0';
 const TOKEN_URL = 'https://api.instagram.com/oauth/access_token';
 
 function esc(s) {
