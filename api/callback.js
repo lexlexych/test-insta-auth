@@ -49,23 +49,32 @@ function errorPage(title, detail) {
     <a class="back" href="/">← Начать заново</a>`);
 }
 
-function successPage({ token, expiresIn, username, userId, permissions }) {
-  const days = expiresIn ? Math.round(expiresIn / 86400) : '—';
+function successPage({ token, expiresIn, exchanged, username, userId, permissions, exErr }) {
+  const days = expiresIn ? Math.round(expiresIn / 86400) : null;
+  const lifeText = exchanged
+    ? `~${days} дн. (60-дневный)`
+    : 'не определён (обмен ig_exchange_token не сработал)';
+  const tokenHeading = exchanged
+    ? 'Long-lived access token (60 дней)'
+    : 'Access token (токен авторизации — рабочий, проверен через /me)';
   const curlSub = `curl -X POST "${GRAPH}/${userId}/subscribed_apps?subscribed_fields=messages&access_token=${token}"`;
   const curlRefresh = `curl "${GRAPH}/refresh_access_token?grant_type=ig_refresh_token&access_token=${token}"`;
 
+  const exNote = exchanged ? '' : `
+    <div class="note">Обмен на 60-дневный токен вернул ошибку, поэтому показан токен авторизации — он рабочий (проверен запросом <code>/me</code>). Ответ обмена для справки:<br><code>${esc(JSON.stringify(exErr))}</code></div>`;
+
   return shell('Готово', `
     <h1 class="ok">Аккаунт подключён ✓</h1>
-    <p class="lede">Авторизация прошла. Токен получен на серверной стороне.</p>
-
+    <p class="lede">Авторизация прошла, токен проверен через /me.</p>
+    ${exNote}
     <div class="card">
       <div class="row"><span class="k">Username</span><span class="v">@${esc(username)}</span></div>
       <div class="row"><span class="k">Instagram user ID</span><span class="v">${esc(userId)}</span></div>
-      <div class="row"><span class="k">Срок жизни токена</span><span class="v">~${esc(days)} дн.</span></div>
+      <div class="row"><span class="k">Срок жизни</span><span class="v">${esc(lifeText)}</span></div>
       <div class="row"><span class="k">Разрешения</span><span class="v tag">${esc(permissions)}</span></div>
     </div>
 
-    <h2>Long-lived access token (60 дней)</h2>
+    <h2>${esc(tokenHeading)}</h2>
     <div class="tokwrap">
       <button class="copy" id="copyBtn" type="button">Копировать</button>
       <pre id="token">${esc(token)}</pre>
@@ -140,43 +149,48 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Шаг 6: short -> long-lived token (60 дней).
-    // Документация показывает GET, но эндпоинт для токенов нового формата (IGAA)
-    // может отвечать "Unsupported request - method type: get". Поэтому пробуем GET,
-    // а при таком отказе — повторяем тот же запрос POST'ом.
+    // Шаг 6: пробуем обменять short -> long-lived (60 дней) через ig_exchange_token.
+    // Если обмен не сработает (для токенов нового формата это возможно) — не падаем,
+    // а используем токен авторизации напрямую и проверяем его через /me.
     const exParams = `grant_type=ig_exchange_token`
       + `&client_secret=${encodeURIComponent(appSecret)}`
       + `&access_token=${encodeURIComponent(short.access_token)}`;
 
-    let j2 = await (await fetch(`${GRAPH}/access_token?${exParams}`, { method: 'GET' })).json();
-    let exGetErr = null;
-    if (!j2.access_token) {
-      exGetErr = j2;
-      j2 = await (await fetch(`${GRAPH}/access_token`, {
+    let exResp = await (await fetch(`${GRAPH}/access_token?${exParams}`, { method: 'GET' })).json();
+    if (!exResp.access_token) {
+      // повтор POST'ом на случай иной требуемой схемы
+      const postResp = await (await fetch(`${GRAPH}/access_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: exParams,
       })).json();
+      if (postResp.access_token) exResp = postResp;
     }
-    if (!j2.access_token) {
+
+    const exchanged = !!exResp.access_token;
+    const workingToken = exchanged ? exResp.access_token : short.access_token;
+    const expiresIn = exchanged ? exResp.expires_in : null;
+
+    // Шаг 7: проверяем токен и узнаём аккаунт через /me (версированный — он работает)
+    const meUrl = `${GRAPH}/me?fields=user_id,username`
+      + `&access_token=${encodeURIComponent(workingToken)}`;
+    const me = await (await fetch(meUrl, { method: 'GET' })).json();
+
+    if (!me || (!me.username && !me.user_id)) {
       res.statusCode = 200;
-      res.end(errorPage('Ошибка обмена на long-lived токен',
-        (exGetErr ? 'Ответ на GET:\n' + JSON.stringify(exGetErr, null, 2) + '\n\n' : '')
-        + 'Ответ на POST:\n' + JSON.stringify(j2, null, 2)
-        + '\n\nShort-lived токен (валиден 1 час) — им можно проверить обмен вручную:\n'
-        + short.access_token));
+      res.end(errorPage('Токен не прошёл проверку через /me',
+        'Ответ /me:\n' + JSON.stringify(me, null, 2)
+        + '\n\nОтвет обмена (для справки):\n' + JSON.stringify(exResp, null, 2)
+        + '\n\nТокен авторизации:\n' + short.access_token));
       return;
     }
 
-    // Шаг 7: кто подключился
-    const meUrl = `${GRAPH}/me?fields=user_id,username`
-      + `&access_token=${encodeURIComponent(j2.access_token)}`;
-    const me = await (await fetch(meUrl, { method: 'GET' })).json();
-
     res.statusCode = 200;
     res.end(successPage({
-      token: j2.access_token,
-      expiresIn: j2.expires_in,
+      token: workingToken,
+      expiresIn,
+      exchanged,
+      exErr: exchanged ? null : exResp,
       username: me.username || '—',
       userId: me.user_id || short.user_id || '—',
       permissions: short.permissions || '—',
